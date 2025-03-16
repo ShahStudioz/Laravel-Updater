@@ -1,0 +1,19 @@
+{
+    "name": "shah/laravel-updater",
+    "description": "A package to update Laravel app",
+    "type": "package",
+    "license": "MIT",
+    "autoload": {
+        "psr-4": {
+            "Shah\\LaravelUpdater\\": "src/"
+        }
+    },
+    "authors": [
+        {
+            "name": "Shah Studios",
+            "email": "shahstudios1@gmail.com"
+        }
+    ],
+    "minimum-stability": "dev",
+    "require": {}
+}
