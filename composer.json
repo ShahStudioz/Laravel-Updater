@@ -1,5 +1,5 @@
 {
-    "name": "shah/laravel-updater",
+    "name": "shahstudioz/laravel-updater",
     "description": "A package to update Laravel app",
     "type": "package",
     "license": "MIT",
