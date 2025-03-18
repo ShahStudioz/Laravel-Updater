@@ -27,6 +27,7 @@ trait Versionable
     {
         $metadata = $this->getMetadata();
         $metadata['version'] = $version;
+        $metadata['last_update'] = now()->toDateTimeString();
         return $this->saveMetadata($metadata);
     }
 
