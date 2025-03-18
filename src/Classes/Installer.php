@@ -122,6 +122,10 @@ class Installer
                     return false;
                 }
                 $this->log('Update script executed successfully', 'info');
+
+                if (File::delete($updateScript)) {
+                    $this->log('Update script Deleted successfully', 'info');
+                }
             } catch (Exception $e) {
                 $this->log('Error executing update script: ' . $e->getMessage(), 'error');
                 return false;
