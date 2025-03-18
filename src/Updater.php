@@ -2,62 +2,64 @@
 
 namespace Shah\LaravelUpdater;
 
-use Illuminate\Support\Facades\File;
-use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Artisan;
 use Exception;
 use Illuminate\Support\Facades\Auth;
-use ZipArchive;
+use Illuminate\Support\Facades\File;
+use Illuminate\Support\Facades\Http;
+use Shah\LaravelUpdater\Classes\Downloader;
+use Shah\LaravelUpdater\Classes\BackupManager;
+use Shah\LaravelUpdater\Classes\Installer;
+use Shah\LaravelUpdater\Classes\RecoveryManager;
+use Shah\LaravelUpdater\Traits\Loggable;
+use Shah\LaravelUpdater\Traits\Versionable;
 
 class Updater
 {
-    /**
-     * Temporary backup directory
-     *
-     * @var string|null
-     */
-    private $backupDir = null;
+    use Loggable, Versionable;
 
-    /**
-     * Response messages
-     *
-     * @var array
-     */
-    private $messages = [];
+    private bool $optimizeEnv = true;
+    private int $requestTimeout = 60;
 
-    /**
-     * License information
-     *
-     * @var array
-     */
-    private $license = null;
+    private array $versionDeatils = [];
 
-    /**
-     * Timeout for the the http request
-     *
-     * @var int
-     */
-    private $requestTimeout = 60;
-
-    public function __construct()
-    {
-        // unlimited max execution time
-        set_time_limit(0);
-
-        // increase memory_limit to 1GB
-        ini_set('memory_limit', '-1');
-
-        // increase max_execution_time to 1 hour
-        ini_set('max_execution_time', 3600);
+    public function __construct(
+        protected Downloader $downloader,
+        protected BackupManager $backupManager,
+        protected Installer $installer,
+        protected RecoveryManager $recoveryManager
+    ) {
+        $this->optimizeEnvironment();
     }
 
     /**
-     * Check if current user has permission to perform updates.
-     *
-     * @return bool
+     * Disable the environment optimization
      */
-    public function checkPermission()
+    public function disableOptimization(): self
+    {
+        $this->optimizeEnv = false;
+
+        return $this;
+    }
+
+    /**
+     * Optimize environment for update process.
+     */
+    protected function optimizeEnvironment(): void
+    {
+        if ($this->optimizeEnv) {
+            // unlimited max execution time
+            set_time_limit(0);
+
+            // increase memory_limit
+            ini_set('memory_limit', '-1');
+
+            // increase max_execution_time
+            ini_set('max_execution_time', 3600);
+        }
+    }
+
+    public function checkPermission(): bool
     {
         $allowedUsers = config('updater.allow_users_id');
 
@@ -65,117 +67,64 @@ class Updater
             return true;
         }
 
-        if (is_array($allowedUsers) && Auth::check()) {
-            return in_array(Auth::id(), $allowedUsers);
-        }
-
-        return false;
+        return is_array($allowedUsers) && Auth::check() && in_array(Auth::id(), $allowedUsers);
     }
 
     /**
-     * Log a message.
-     *
-     * @param string $message
-     * @param string $type
-     * @return void
+     * Set a Custom timeout for requests
      */
-    public function log($message, $type = 'info')
+    public function setTimeOut(int $timeOut = 60): self
     {
-        $header = "MangaCMSUpdater - ";
-
-        // Add to messages array
-        $this->messages[] = [
-            'message' => $message,
-            'type' => $type
-        ];
-
-        // Log to Laravel logs
-        if ($type == 'info') {
-            Log::info($header . '[info] ' . $message);
-        } elseif ($type == 'warn' || $type == 'warning') {
-            Log::warning($header . '[warn] ' . $message);
-        } elseif ($type == 'err' || $type == 'error') {
-            Log::error($header . '[err] ' . $message);
-        }
+        $this->requestTimeout = $timeOut;
+        $this->downloader->setTimeOut($timeOut);
+        return $this;
     }
 
-    /**
-     * Get all logged messages.
-     *
-     * @return array
-     */
-    public function getMessages()
-    {
-        return $this->messages;
-    }
 
     /**
-     * Get the current version.
+     * Check for available updates by making a request to the update server
      *
-     * @return string
-     */
-    public function getCurrentVersion()
-    {
-        $versionFile = config('updater.version_file', base_path('version.txt'));
-
-        if (!File::exists($versionFile)) {
-            $this->log('Version file not found. Creating with default version 1.0.0', 'info');
-            File::put($versionFile, '1.0.0');
-            return '1.0.0';
-        }
-
-        return trim(File::get($versionFile));
-    }
-
-    /**
-     * Set the current version.
+     * @param string $url Optional custom URL to check for updates. If empty, uses configured base URL
+     * @param array $requestHeaders Optional array of headers to include in the request
+     * @param string $requestMethod HTTP method to use for request (post or get), defaults to post
      *
-     * @param string $version
-     * @return bool
+     * @return array Returns an array with:
+     *               - On success with updates: Update data from server including version
+     *               - On success no updates: ['status' => true, 'message' => 'No updates Available']
+     *               - On failure: ['status' => false, 'message' => error message, 'error' => error details]
      */
-    public function setCurrentVersion($version)
-    {
-        $versionFile = config('updater.version_file', base_path('version.txt'));
-
-        try {
-            File::put($versionFile, $version);
-            return true;
-        } catch (Exception $e) {
-            $this->log('Failed to update version file: ' . $e->getMessage(), 'error');
-            return false;
-        }
-    }
-
-    /**
-     * Check for updates from the remote server.
-     *
-     * @return array|null
-     */
-    public function checkForUpdates()
+    public function checkForUpdates(string $url = '', array $requestHeaders = [], string $requestMethod = 'post'): array
     {
         if (!config('updater.online_check', true)) {
             $this->log('Online update check is disabled', 'info');
-            return null;
+            return [
+                'status' => false,
+                'message' => 'Online update check is disabled',
+            ];
         }
 
         try {
             $currentVersion = $this->getCurrentVersion();
             $this->log('Checking for updates. Current version: ' . $currentVersion, 'info');
 
-            $updateUrl = rtrim(config('updater.update_baseurl'), '/') . '/updater.json';
-
-            // Include license information if available
-            $headers = [];
-            if ($this->license) {
-                $headers = [
-                    'X-License-Key' => $this->license['key'] ?? null,
-                    'X-License-Name' => $this->license['name'] ?? null,
-                    'X-License-Email' => $this->license['email'] ?? null,
-                    'X-Domain' => request()->getHost()
-                ];
+            if (!empty($url)) {
+                $updateUrl = $url;
+            } else {
+                $updateUrl = rtrim(config('updater.update_baseurl'), '/') . '/updates.json';
             }
 
-            $response = Http::withHeaders($headers)->get($updateUrl);
+            $headers = [];
+            if (!empty($requestHeaders)) {
+                $headers = $requestHeaders;
+            }
+
+            $request = Http::timeout($this->requestTimeout)->withHeaders($headers);
+
+            if ($requestMethod == 'post') {
+                $response = $request->post($updateUrl);
+            } else {
+                $response = $request->get($updateUrl);
+            }
 
             if ($response->successful()) {
                 $updateData = $response->json();
@@ -185,99 +134,40 @@ class Updater
                     return $updateData;
                 } else {
                     $this->log('No updates available', 'info');
-                    return null;
+                    return [
+                        'status' => true,
+                        'message' => 'No updates Available',
+                    ];
                 }
             } else {
                 $this->log('Failed to check for updates: ' . $response->status(), 'error');
-                return null;
+                return [
+                    'status' => false,
+                    'message' => 'Failed to check for updates',
+                    'error' => $response->status(),
+                ];
             }
         } catch (Exception $e) {
             $this->log('Exception while checking for updates: ' . $e->getMessage(), 'error');
-            return null;
+            return [
+                'status' => false,
+                'message' => 'Failed to check for updates',
+                'error' => $e->getMessage(),
+            ];
         }
     }
 
     /**
-     * Set license information.
-     *
-     * @param array $license
-     * @return $this
+     * Downlaod the update zip file
      */
-    public function setLicense($license)
+    private function download(string $filename): string|false
     {
-        $this->license = $license;
-        return $this;
+        return $this->downloader->download($filename);
     }
 
-    /**
-     * Set a custom timeout for request
-     *
-     * @param int $timeOut
-     * @return $this
-     */
-    public function setTimeOut(int $timeOut = 60)
+    public function installFromZip(string $zipFile): bool
     {
-        $this->requestTimeout = $timeOut;
-
-        return $this;
-    }
-
-    /**
-     * Download an update package.
-     *
-     * @param string $filename
-     * @return string|false
-     */
-    public function download($filename)
-    {
-        $tmpDir = base_path() . '/' . config('updater.tmp_directory', 'updater_tmp');
-
-        if (!is_dir($tmpDir)) {
-            File::makeDirectory($tmpDir, 0755, true);
-        }
-
-        try {
-            $localFile = $tmpDir . '/' . $filename;
-            $remoteFileUrl = rtrim(config('updater.update_baseurl'), '/') . '/' . $filename;
-
-            $this->log('Downloading update from: ' . $remoteFileUrl, 'info');
-
-            // Include license information if available
-            $headers = [];
-            if ($this->license) {
-                $headers = [
-                    'X-License-Key' => $this->license['key'] ?? null,
-                    'X-License-Name' => $this->license['name'] ?? null,
-                    'X-License-Email' => $this->license['email'] ?? null,
-                    'X-Domain' => request()->getHost()
-                ];
-            }
-
-            $response = Http::timeout($this->requestTimeout)->withHeaders($headers)->get($remoteFileUrl);
-
-            if ($response->successful()) {
-                File::put($localFile, $response->body());
-                $this->log('Download successful', 'info');
-                return $localFile;
-            } else {
-                $this->log('Download failed: ' . $response->status(), 'error');
-                return false;
-            }
-        } catch (Exception $e) {
-            $this->log('Exception while downloading update: ' . $e->getMessage(), 'error');
-            return false;
-        }
-    }
-
-    /**
-     * Install an update from a local zip file.
-     *
-     * @param string $zipFile Path to the zip file
-     * @return bool
-     */
-    public function installFromZip($zipFile)
-    {
-        if (!File::exists($zipFile)) {
+        if (!file_exists($zipFile)) {
             $this->log('Update file not found: ' . $zipFile, 'error');
             return false;
         }
@@ -286,7 +176,15 @@ class Updater
             Artisan::call('down');
             $this->log('Maintenance mode enabled', 'info');
 
-            $result = $this->extractAndInstall($zipFile);
+            $backupPath = $this->backupManager->createBackup($zipFile);
+            if (!$backupPath) {
+                $this->log('Backup failed, update aborted.', 'error');
+                Artisan::call('up');
+                $this->log('Maintenance mode disabled after error', 'info');
+                return false;
+            }
+
+            $result = $this->installer->install($zipFile);
 
             Artisan::call('up');
             $this->log('Maintenance mode disabled', 'info');
@@ -294,214 +192,22 @@ class Updater
             return $result;
         } catch (Exception $e) {
             $this->log('Exception during installation: ' . $e->getMessage(), 'error');
-            $this->recovery();
+            $this->recoveryManager->recover();
             Artisan::call('up');
             $this->log('Maintenance mode disabled after error', 'info');
             return false;
         }
     }
 
-    /**
-     * Extract and install an update from a zip file.
-     *
-     * @param string $zipFile
-     * @return bool
-     */
-    private function extractAndInstall($zipFile)
+    public function recovery(): bool
     {
-        $this->log('Starting installation process', 'info');
-        $tmpDir = dirname($zipFile);
-        $extractDir = $tmpDir . '/extract';
-
-        // Create extraction directory
-        if (!is_dir($extractDir)) {
-            File::makeDirectory($extractDir, 0755, true);
-        }
-
-        $zip = new ZipArchive();
-        if ($zip->open($zipFile) !== true) {
-            $this->log('Could not open the zip file', 'error');
-            return false;
-        }
-
-        // Extract zip
-        $zip->extractTo($extractDir);
-        $zip->close();
-
-        // Check for version file
-        $versionFile = $extractDir . '/version.txt';
-        $newVersion = null;
-
-        if (File::exists($versionFile)) {
-            $newVersion = trim(File::get($versionFile));
-            $this->log('New version from package: ' . $newVersion, 'info');
-        }
-
-        // Look for update script
-        $updateScript = $extractDir . '/' . config('updater.script_filename', 'upgrade.php');
-        $hasUpdateScript = File::exists($updateScript);
-
-        $this->log('Installing files...', 'info');
-
-        // Process all files recursively
-        $allFiles = File::allFiles($extractDir);
-
-        foreach ($allFiles as $file) {
-            $relativePath = str_replace($extractDir . '/', '', $file->getPathname());
-
-            // Skip the update script and version file for now
-            if ($relativePath === 'version.txt' || $relativePath === config('updater.script_filename', 'upgrade.php')) {
-                continue;
-            }
-
-            // Skip metadata files
-            if (strpos($relativePath, '__MACOSX') === 0 || strpos($relativePath, '.DS_Store') !== false) {
-                continue;
-            }
-
-            $targetPath = base_path() . '/' . $relativePath;
-            $targetDir = dirname($targetPath);
-
-            // Create directory if it doesn't exist
-            if (!is_dir($targetDir)) {
-                File::makeDirectory($targetDir, 0755, true);
-                $this->log('Created directory: ' . $targetDir, 'info');
-            }
-
-            // Backup existing file before overwriting
-            if (File::exists($targetPath)) {
-                $this->backup($relativePath);
-            }
-
-            // Copy file to target location
-            File::copy($file->getPathname(), $targetPath);
-            $this->log('Installed file: ' . $relativePath, 'info');
-        }
-
-        // Execute update script if it exists
-        if ($hasUpdateScript) {
-            $this->log('Executing update script', 'info');
-            try {
-                // Include the script in a safe context
-                ob_start();
-                $result = require $updateScript;
-                ob_end_clean();
-
-                if ($result === false) {
-                    $this->log('Update script returned failure', 'error');
-                    return false;
-                }
-
-                $this->log('Update script executed successfully', 'info');
-            } catch (Exception $e) {
-                $this->log('Error executing update script: ' . $e->getMessage(), 'error');
-                return false;
-            }
-        }
-
-        // If we have a new version, update the version file
-        if ($newVersion) {
-            $this->setCurrentVersion($newVersion);
-            $this->log('Updated system version to: ' . $newVersion, 'info');
-        }
-
-        // Run post-update commands
-        if (config('updater.post_update_commands', [])) {
-            $this->log('Running post-update commands', 'info');
-            foreach (config('updater.post_update_commands') as $command) {
-                $this->log('Running: ' . $command, 'info');
-                try {
-                    Artisan::call($command);
-                    $this->log('Command output: ' . Artisan::output(), 'info');
-                } catch (Exception $e) {
-                    $this->log('Command failed: ' . $e->getMessage(), 'warning');
-                }
-            }
-        }
-
-        // Clean up
-        File::deleteDirectory($extractDir);
-        File::delete($zipFile);
-        $this->log('Cleanup completed', 'info');
-
-        return true;
+        return $this->recoveryManager->recover();
     }
 
     /**
-     * Backup a file before overwriting it.
-     *
-     * @param string $relativePath
-     * @return bool
+     * Downlaod the update zip file
      */
-    private function backup($relativePath)
-    {
-        if (!$this->backupDir) {
-            $this->backupDir = base_path() . '/backup_' . date('Ymd_His');
-        }
-
-        $sourcePath = base_path() . '/' . $relativePath;
-        $backupPath = $this->backupDir . '/' . $relativePath;
-        $backupDir = dirname($backupPath);
-
-        if (!is_dir($backupDir)) {
-            File::makeDirectory($backupDir, 0755, true);
-        }
-
-        try {
-            File::copy($sourcePath, $backupPath);
-            return true;
-        } catch (Exception $e) {
-            $this->log('Failed to backup file: ' . $relativePath . ' - ' . $e->getMessage(), 'error');
-            return false;
-        }
-    }
-
-    /**
-     * Recovery from backup if update fails.
-     *
-     * @return bool
-     */
-    public function recovery()
-    {
-        if (!$this->backupDir || !is_dir($this->backupDir)) {
-            $this->log('No backup directory found for recovery', 'error');
-            return false;
-        }
-
-        $this->log('Starting recovery process from backup: ' . $this->backupDir, 'info');
-
-        try {
-            $files = File::allFiles($this->backupDir);
-
-            foreach ($files as $file) {
-                $relativePath = str_replace($this->backupDir . '/', '', $file->getPathname());
-                $targetPath = base_path() . '/' . $relativePath;
-
-                // Ensure target directory exists
-                $targetDir = dirname($targetPath);
-                if (!is_dir($targetDir)) {
-                    File::makeDirectory($targetDir, 0755, true);
-                }
-
-                // Restore from backup
-                File::copy($file->getPathname(), $targetPath);
-                $this->log('Restored file: ' . $relativePath, 'info');
-            }
-
-            $this->log('Recovery completed successfully', 'info');
-            return true;
-        } catch (Exception $e) {
-            $this->log('Recovery failed: ' . $e->getMessage(), 'error');
-            return false;
-        }
-    }
-
-    /**
-     * Update the system with the latest version.
-     *
-     * @return bool
-     */
-    public function update()
+    public function update(): bool
     {
         $this->log('Starting update process. Current version: ' . $this->getCurrentVersion(), 'info');
 
@@ -510,15 +216,13 @@ class Updater
             return false;
         }
 
-        // Check for updates
         $updateInfo = $this->checkForUpdates();
 
-        if (!$updateInfo) {
-            $this->log('No updates available or failed to check', 'info');
+        if (isset($updateInfo['status'])) {
+            $this->log($updateInfo['message'], 'info');
             return false;
         }
 
-        // Download the update
         $zipFile = $this->download($updateInfo['archive']);
 
         if (!$zipFile) {
@@ -526,22 +230,13 @@ class Updater
             return false;
         }
 
-        // Install the update
-        $result = $this->installFromZip($zipFile);
-
-        return $result;
+        return $this->installFromZip($zipFile);
     }
 
-    /**
-     * Install a package to vendor directory.
-     * 
-     * @param string $packageName
-     * @param string $zipFile Path to the zip file containing the package
-     * @return bool
-     */
-    public function installPackage($packageName, $zipFile)
+    public function installPackage(string $packageName, string $zipFile): bool
     {
-        if (!File::exists($zipFile)) {
+        // You can keep this method here or move it to a dedicated PackageManager class if needed.
+        if (!file_exists($zipFile)) {
             $this->log("Package file not found: $zipFile", 'error');
             return false;
         }
@@ -550,35 +245,29 @@ class Updater
         $packageDir = $vendorDir . '/' . $packageName;
         $extractDir = dirname($zipFile) . '/package_extract';
 
-        // Create extraction directory
         if (!is_dir($extractDir)) {
-            File::makeDirectory($extractDir, 0755, true);
+            mkdir($extractDir, 0755, true);
         }
 
         try {
-            $zip = new ZipArchive();
+            $zip = new \ZipArchive();
             if ($zip->open($zipFile) !== true) {
                 $this->log('Could not open the package zip file', 'error');
                 return false;
             }
 
-            // Extract zip
             $zip->extractTo($extractDir);
             $zip->close();
 
-            // Backup existing package if it exists
             if (is_dir($packageDir)) {
                 $backupDir = $vendorDir . '/backup_' . str_replace('/', '_', $packageName) . '_' . date('Ymd_His');
-                File::moveDirectory($packageDir, $backupDir);
+                rename($packageDir, $backupDir);
                 $this->log("Backed up existing package to: $backupDir", 'info');
             }
 
-            // Find the package root in the extracted files
             $packageRoot = $extractDir;
-            $subdirs = File::directories($extractDir);
+            $subdirs = glob($extractDir . '/*', GLOB_ONLYDIR);
 
-            // If there's only one directory at the root and it's name contains the package name
-            // use that as the source (handles cases where zip contains a root folder)
             if (count($subdirs) === 1) {
                 $dirName = basename($subdirs[0]);
                 if (strpos($dirName, basename($packageName)) !== false) {
@@ -586,38 +275,13 @@ class Updater
                 }
             }
 
-            // Move the package to vendor directory
-            File::makeDirectory($packageDir, 0755, true, true);
+            if (!is_dir($packageDir)) {
+                mkdir($packageDir, 0755, true, true);
+            }
             $this->log("Installing package to: $packageDir", 'info');
 
-            // Copy all files from the package root to the vendor directory
-            $allFiles = File::allFiles($packageRoot);
-            foreach ($allFiles as $file) {
-                $relativePath = str_replace($packageRoot . '/', '', $file->getPathname());
-                $targetPath = $packageDir . '/' . $relativePath;
-                $targetDir = dirname($targetPath);
+            $this->recursiveCopy($packageRoot, $packageDir);
 
-                if (!is_dir($targetDir)) {
-                    File::makeDirectory($targetDir, 0755, true);
-                }
-
-                File::copy($file->getPathname(), $targetPath);
-            }
-
-            // Copy all directories
-            $allDirs = File::directories($packageRoot);
-            foreach ($allDirs as $dir) {
-                $relativePath = str_replace($packageRoot . '/', '', $dir);
-                $targetPath = $packageDir . '/' . $relativePath;
-
-                if (!is_dir($targetPath)) {
-                    File::makeDirectory($targetPath, 0755, true);
-                }
-
-                File::copyDirectory($dir, $targetPath);
-            }
-
-            // Clean up
             File::deleteDirectory($extractDir);
             File::delete($zipFile);
 
@@ -629,24 +293,29 @@ class Updater
         }
     }
 
-    /**
-     * Check if a package exists in the vendor directory.
-     * 
-     * @param string $packageName
-     * @return bool
-     */
-    public function packageExists($packageName)
+    private function recursiveCopy($src, $dst)
+    {
+        $dir = opendir($src);
+        @mkdir($dst);
+        while (false !== ($file = readdir($dir))) {
+            if (($file != '.') && ($file != '..')) {
+                if (is_dir($src . '/' . $file)) {
+                    $this->recursiveCopy($src . '/' . $file, $dst . '/' . $file);
+                } else {
+                    copy($src . '/' . $file, $dst . '/' . $file);
+                }
+            }
+        }
+        closedir($dir);
+    }
+
+    public function packageExists(string $packageName): bool
     {
         $packageDir = base_path('vendor/' . $packageName);
         return is_dir($packageDir);
     }
 
-    /**
-     * Clear application cache.
-     * 
-     * @return bool
-     */
-    public function clearCache()
+    public function clearCache(): bool
     {
         try {
             $this->log('Clearing application cache', 'info');
@@ -654,55 +323,10 @@ class Updater
             Artisan::call('config:clear');
             Artisan::call('view:clear');
             Artisan::call('route:clear');
-
             $this->log('Cache cleared successfully', 'info');
             return true;
         } catch (Exception $e) {
             $this->log('Failed to clear cache: ' . $e->getMessage(), 'error');
-            return false;
-        }
-    }
-
-    /**
-     * Verify license with the update server.
-     * 
-     * @param array $licenseData
-     * @return array|false
-     */
-    public function verifyLicense($licenseData)
-    {
-        if (!isset($licenseData['key']) || !isset($licenseData['email'])) {
-            $this->log('Invalid license data', 'error');
-            return false;
-        }
-
-        try {
-            $verifyUrl = rtrim(config('updater.update_baseurl'), '/') . '/verify-license';
-
-            $response = Http::post($verifyUrl, [
-                'license_key' => $licenseData['key'],
-                'email' => $licenseData['email'],
-                'product' => config('updater.product_name', 'manga-cms'),
-                'domain' => request()->getHost()
-            ]);
-
-            if ($response->successful()) {
-                $result = $response->json();
-
-                if (isset($result['valid']) && $result['valid']) {
-                    $this->license = $licenseData;
-                    $this->log('License verification successful', 'info');
-                    return $result;
-                } else {
-                    $this->log('License verification failed: ' . ($result['message'] ?? 'Unknown error'), 'error');
-                    return false;
-                }
-            } else {
-                $this->log('License verification request failed: ' . $response->status(), 'error');
-                return false;
-            }
-        } catch (Exception $e) {
-            $this->log('Exception during license verification: ' . $e->getMessage(), 'error');
             return false;
         }
     }

@@ -18,14 +18,9 @@ return [
     'script_filename' => 'upgrade.php',
 
     /*
-    | URL where updates are stored
+    | Base URL where updates are stored
     */
     'update_baseurl' => env('UPDATER_URL', 'http://your-update-server.com/updates'),
-
-    /*
-    | Product name - used for license verification
-    */
-    'product_name' => env('UPDATER_PRODUCT', 'manga-cms'),
 
     /*
     | Route prefix for the updater
@@ -44,19 +39,9 @@ return [
     'allow_users_id' => [1],
 
     /*
-    | Path to the version file
-    */
-    'version_file' => base_path('version.txt'),
-
-    /*
     | Enable/disable online update checks
     */
     'online_check' => true,
-
-    /*
-    | Require license for updates
-    */
-    'requires_license' => true,
 
     /*
     | Commands to run after update
@@ -67,5 +52,14 @@ return [
         'view:cache',
         'route:cache',
         'migrate --force'
+    ],
+
+    /*
+    | Paths to exclude from the update process
+    */
+    'excluded_paths' => [
+        '.env',
+        'storage',
+        'bootstrap/cache',
     ],
 ];
