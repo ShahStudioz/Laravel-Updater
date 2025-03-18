@@ -49,7 +49,7 @@ class UpdaterServiceProvider extends ServiceProvider
 
         // Register the facade
         $this->app->singleton('updater', function ($app) {
-            return new Updater();
+            return $app->make(Updater::class);
         });
     }
 }
