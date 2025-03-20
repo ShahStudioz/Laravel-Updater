@@ -165,7 +165,7 @@ class Updater
         return $this->downloader->download($filename);
     }
 
-    public function installFromZip(string $zipFile): bool
+    public function installFromZip(string $zipFile, $versionUpdate): bool
     {
         if (!file_exists($zipFile)) {
             $this->log('Update file not found: ' . $zipFile, 'error');
@@ -184,7 +184,7 @@ class Updater
                 return false;
             }
 
-            $result = $this->installer->install($zipFile);
+            $result = $this->installer->install($zipFile, $versionUpdate);
 
             Artisan::call('up');
             $this->log('Maintenance mode disabled', 'info');
@@ -205,9 +205,12 @@ class Updater
     }
 
     /**
-     * Downlaod the update zip file
+     * Download install the latest update from Zip Url
+     * 
+     * @param string $zipUrl Url of the zip to download
+     * @param string $versionUpdate update the version (a zip could be used to simply replace directories without version change)
      */
-    public function update(string $zipUrl): bool
+    public function update(string $zipUrl, bool $versionUpdate = false): bool
     {
         $this->log('Starting update process. Current version: ' . $this->getCurrentVersion(), 'info');
 
@@ -223,7 +226,7 @@ class Updater
             return false;
         }
 
-        return $this->installFromZip($zipFile);
+        return $this->installFromZip($zipFile, $versionUpdate);
     }
 
     public function installPackage(string $packageName, string $zipFile): bool

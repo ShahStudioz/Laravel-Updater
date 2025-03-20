@@ -20,7 +20,7 @@ use Illuminate\Support\Facades\Facade;
  * @method string|false download(string $filename) Download update zip file
  * @method bool installFromZip(string $zipFile) Install update from a zip file
  * @method bool recovery() Recover the application to previous state
- * @method bool update() Download and install the latest update
+ * @method bool update(string $zipUrl, $versionUpdate) Download install the latest update from Zip Url
  * @method bool installPackage(string $packageName, string $zipFile) Install a package from zip file
  * @method bool packageExists(string $packageName) Check if package exists in vendor directory
  * @method bool clearCache() Clear application cache

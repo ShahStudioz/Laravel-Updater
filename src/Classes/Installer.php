@@ -13,7 +13,7 @@ class Installer
 {
     use Loggable, Versionable;
 
-    public function install(string $zipFile): bool
+    public function install(string $zipFile, bool $versionUpdate): bool
     {
         $this->log('Starting installation process', 'info');
 
@@ -132,7 +132,7 @@ class Installer
             }
         }
 
-        if ($newVersion) {
+        if ($versionUpdate && $newVersion) {
             $this->setCurrentVersion($newVersion);
             $this->addUpdateLog('Updated to version: ' . $newVersion);
         }
