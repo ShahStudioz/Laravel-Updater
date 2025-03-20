@@ -207,7 +207,7 @@ class Updater
     /**
      * Downlaod the update zip file
      */
-    public function update(): bool
+    public function update(string $zipUrl): bool
     {
         $this->log('Starting update process. Current version: ' . $this->getCurrentVersion(), 'info');
 
@@ -216,14 +216,7 @@ class Updater
             return false;
         }
 
-        $updateInfo = $this->checkForUpdates();
-
-        if (isset($updateInfo['status'])) {
-            $this->log($updateInfo['message'], 'info');
-            return false;
-        }
-
-        $zipFile = $this->download($updateInfo['archive']);
+        $zipFile = $this->download($zipUrl);
 
         if (!$zipFile) {
             $this->log('Failed to download update package', 'error');
